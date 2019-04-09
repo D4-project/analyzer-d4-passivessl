@@ -2,19 +2,27 @@ package main
 
 import (
 	"bytes"
+	"crypto/dsa"
+	"crypto/ecdsa"
+	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"errors"
 	"fmt"
+	_ "github.com/lib/pq"
 	"io/ioutil"
 	"log"
+	"math/big"
 	"strings"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
-	_ "github.com/lib/pq"
 )
+
+type BigNumber big.Int
 
 type certMapElm struct {
 	CertHash string
@@ -42,6 +50,7 @@ type chain struct {
 }
 
 var db *sql.DB
+//var db *sqlx.DB
 var cr redis.Conn
 
 var connectRedis = false
@@ -92,17 +101,53 @@ func main() {
 		if err != nil {
 			log.Fatal(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
 		}
-		// Launch go routine to create the relationship between certificates and sessions
-		err = linkSessionCert(ids, idc)
+		// Create the relationship between certificates and sessions
+		err = linkSessionCerts(ids, idc)
 		if err != nil {
-			log.Fatal(fmt.Sprintf("Could not link Certs and Session into DB failed: %q", err))
+			log.Fatal(fmt.Sprintf("Could not link Certs and Session into DB: %q", err))
 		}
-		// Launch go routine to create public keys
 	}
 }
 
-// linkSessionCert creates the link between a session and its certificates
-func linkSessionCert(ids int64, idc []string) error {
+// insertPublicKeys insert each public key of each certificate of a session
+func insertPublicKey(c x509.Certificate) (string, error) {
+	pub, err := x509.ParsePKIXPublicKey(c.RawSubjectPublicKeyInfo)
+	hash := fmt.Sprintf("%x", sha256.Sum256(c.RawSubjectPublicKeyInfo))
+	if err != nil {
+		return hash, nil
+	}
+
+	switch pub := pub.(type) {
+	case *rsa.PublicKey:
+		q := `INSERT INTO "public_key" (hash, type, modulus, exponent, modulus_size) VALUES ($1, $2, $3, $4, $5)`
+		_, err := db.Query(q, hash, "RSA", (*BigNumber)(pub.N), pub.E, pub.Size())
+		if err != nil {
+			return hash, nil
+		}
+	case *dsa.PublicKey:
+		q := `INSERT INTO "public_key" (hash, type, "G", "P", "Q", "Y") VALUES ($1, $2, $3, $4, $5, $6)`
+		_, err := db.Query(q, hash, "DSA", (*BigNumber)(pub.Parameters.G), (*BigNumber)(pub.Parameters.P), (*BigNumber)(pub.Parameters.Q), (*BigNumber)(pub.Y))
+		if err != nil {
+			return hash, nil
+		}
+	case *ecdsa.PublicKey:
+		q := `INSERT INTO "public_key" (hash, type, "Y", "X", "P", "N", "B", "bitsize", "Gx", "Gy") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`
+		_, err := db.Query(q, hash, "ECDSA", pub.Y, pub.X, pub.Curve.Params().P, pub.Curve.Params().N, pub.Curve.Params().B, pub.Curve.Params().BitSize, pub.Curve.Params().Gx, pub.Curve.Params().Gy)
+		if err != nil {
+			return hash, nil
+		}
+	default:
+		return hash, fmt.Errorf("PKIx: could not determine the type of key %g", pub)
+	}
+	return hash, nil
+}
+
+func (bn *BigNumber) Value() (driver.Value, error) {
+	return driver.Value((*big.Int)(bn).Text(10)), nil
+}
+
+// linkSessionCerts creates the link between a session and its certificates
+func linkSessionCerts(ids int64, idc []string) error {
 	for _, i := range idc {
 		q := `INSERT INTO "many_sessionRecord_has_many_certificate" ("id_sessionRecord", "hash_certificate") VALUES ($1, $2)`
 		_, err := db.Query(q, ids, i)
@@ -117,7 +162,7 @@ func linkSessionCert(ids int64, idc []string) error {
 // contains a slice of certificate). If the chain of trust is build successfully
 // it marked as valid, If not root is found or if the chain is broken, it
 // does not touch the original slice and mark the chain as invalid.
-func buildChain(s *sessionRecord) (*sessionRecord) {
+func buildChain(s *sessionRecord) *sessionRecord {
 	certChain := make([]certMapElm, 0)
 
 	// First we find the leaf
@@ -157,25 +202,35 @@ func insertCertificate(c certMapElm) (string, error) {
 	var hash string
 	err := db.QueryRow(q, c.CertHash, c.Certificate.IsCA, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), c.chain.s, c.chain.isValid, getFullPath(c.CertHash)).Scan(&hash)
 	if err != nil {
-		return "", err
+		return hash, err
+	}
+	key, err := insertPublicKey(*c.Certificate)
+	if err != nil {
+		return hash, err
+	}
+
+	q = `INSERT INTO "many_certificate_has_many_public_key" ("hash_certificate", "hash_public_key") VALUES ($1, $2)`
+	_, err = db.Query(q, hash, key)
+	if err != nil {
+		return hash, err
 	}
 	return hash, nil
 }
 
 // getFullPath takes a certificate's hash and return the full path to
 // its location on disk
-func getFullPath(h string) (string) {
+func getFullPath(h string) string {
 	return "TODO PATH"
 }
 
 func insertCertificates(s *sessionRecord) ([]string, error) {
 	var inserted []string
 	for _, certificate := range s.Certificates {
-		idc, err := insertCertificate(certificate)
+		tmp, err := insertCertificate(certificate)
+		inserted = append(inserted, tmp)
 		if err != nil {
 			return inserted, err
 		}
-		inserted = append(inserted, idc)
 	}
 	return inserted, nil
 }
@@ -203,7 +258,7 @@ func initDB() {
 	err := errors.New("")
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
-		panic(err)
+		log.Fatalln(err)
 	}
 }
 

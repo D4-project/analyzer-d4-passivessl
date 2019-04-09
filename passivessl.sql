@@ -32,8 +32,19 @@ CREATE TABLE public.public_key(
 	hash bytea NOT NULL,
 	type text NOT NULL,
 	modulus text,
-	exponent smallint,
-	modules_size smallint,
+	exponent int4,
+	modulus_size int4,
+	"P" numeric,
+	"Q" numeric,
+	"G" numeric,
+	"Y" numeric,
+	"X" numeric,
+	"N" numeric,
+	"B" numeric,
+	bitsize int4,
+	curve_name varchar(256),
+	"Gx" numeric,
+	"Gy" numeric,
 	CONSTRAINT public_key_pk PRIMARY KEY (hash)
 
 );
@@ -51,6 +62,8 @@ CREATE TABLE public.certificate(
 	hash bytea NOT NULL,
 	"is_CA" bool NOT NULL DEFAULT false,
 	is_valid_chain bool NOT NULL DEFAULT false,
+	"notBefore" time,
+	"notAfter" time,
 	CONSTRAINT certificate_pk PRIMARY KEY (hash)
 
 );
