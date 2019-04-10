@@ -64,6 +64,7 @@ CREATE TABLE public.certificate(
 	is_valid_chain bool NOT NULL DEFAULT false,
 	"notBefore" time,
 	"notAfter" time,
+	"isSS" bool NOT NULL DEFAULT false,
 	CONSTRAINT certificate_pk PRIMARY KEY (hash)
 
 );
@@ -117,7 +118,7 @@ ALTER TABLE public."sessionRecord" OWNER TO postgres;
 CREATE TABLE public.ja3(
 	hash bytea NOT NULL,
 	raw text,
-	type smallint NOT NULL,
+	type varchar(16) NOT NULL,
 	CONSTRAINT j3a_pk PRIMARY KEY (hash)
 
 );
