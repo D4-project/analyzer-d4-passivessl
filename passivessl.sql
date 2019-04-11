@@ -4,12 +4,15 @@
 -- Project Site: pgmodeler.com.br
 -- Model Author: ---
 
+SET check_function_bodies = false;
+-- ddl-end --
+
 
 -- Database creation must be done outside an multicommand file.
 -- These commands were put in this file only for convenience.
--- -- object: new_database | type: DATABASE --
--- -- DROP DATABASE IF EXISTS new_database;
--- CREATE DATABASE new_database
+-- -- object: passive_ssl | type: DATABASE --
+-- -- DROP DATABASE IF EXISTS passive_ssl;
+-- CREATE DATABASE passive_ssl
 -- ;
 -- -- ddl-end --
 -- 
@@ -64,7 +67,7 @@ CREATE TABLE public.certificate(
 	is_valid_chain bool NOT NULL DEFAULT false,
 	"notBefore" time,
 	"notAfter" time,
-	"isSS" bool NOT NULL DEFAULT false,
+	"is_SS" bool NOT NULL DEFAULT false,
 	CONSTRAINT certificate_pk PRIMARY KEY (hash)
 
 );
@@ -104,7 +107,7 @@ CREATE TABLE public."sessionRecord"(
 	src_ip inet NOT NULL,
 	dst_port int4 NOT NULL,
 	src_port int4 NOT NULL,
-	hash_ja3 bytea,
+	hash_ja3 bytea NOT NULL,
 	"timestamp" time(0) with time zone,
 	CONSTRAINT "sessionRecord_pk" PRIMARY KEY (id)
 
@@ -130,7 +133,7 @@ ALTER TABLE public.ja3 OWNER TO postgres;
 -- ALTER TABLE public."sessionRecord" DROP CONSTRAINT IF EXISTS ja3_fk CASCADE;
 ALTER TABLE public."sessionRecord" ADD CONSTRAINT ja3_fk FOREIGN KEY (hash_ja3)
 REFERENCES public.ja3 (hash) MATCH FULL
-ON DELETE SET NULL ON UPDATE CASCADE;
+ON DELETE RESTRICT ON UPDATE CASCADE;
 -- ddl-end --
 
 -- object: public."many_sessionRecord_has_many_certificate" | type: TABLE --
@@ -162,8 +165,8 @@ ON DELETE RESTRICT ON UPDATE CASCADE;
 CREATE TABLE public.fuzzy_hash(
 	id bigserial NOT NULL,
 	type text NOT NULL,
-	value public.hstore NOT NULL,
-	hash_ja3 bytea,
+	value text NOT NULL,
+	"id_sessionRecord" bigint,
 	CONSTRAINT fuzzy_hash_pk PRIMARY KEY (id)
 
 );
@@ -258,11 +261,62 @@ CREATE INDEX path_index ON public.certificate
 	WITH (BUFFERING = ON);
 -- ddl-end --
 
--- object: ja3_fk | type: CONSTRAINT --
--- ALTER TABLE public.fuzzy_hash DROP CONSTRAINT IF EXISTS ja3_fk CASCADE;
-ALTER TABLE public.fuzzy_hash ADD CONSTRAINT ja3_fk FOREIGN KEY (hash_ja3)
-REFERENCES public.ja3 (hash) MATCH FULL
+-- object: "sessionRecord_fk" | type: CONSTRAINT --
+-- ALTER TABLE public.fuzzy_hash DROP CONSTRAINT IF EXISTS "sessionRecord_fk" CASCADE;
+ALTER TABLE public.fuzzy_hash ADD CONSTRAINT "sessionRecord_fk" FOREIGN KEY ("id_sessionRecord")
+REFERENCES public."sessionRecord" (id) MATCH FULL
 ON DELETE SET NULL ON UPDATE CASCADE;
+-- ddl-end --
+
+-- object: plpython3u | type: LANGUAGE --
+-- DROP LANGUAGE IF EXISTS plpython3u CASCADE;
+CREATE  LANGUAGE plpython3u;
+-- ddl-end --
+ALTER LANGUAGE plpython3u OWNER TO postgres;
+-- ddl-end --
+
+-- object: public.tlshc | type: FUNCTION --
+-- DROP FUNCTION IF EXISTS public.tlshc(text,text) CASCADE;
+CREATE FUNCTION public.tlshc ( a text,  b text)
+	RETURNS int4
+	LANGUAGE plpython3u
+	VOLATILE 
+	CALLED ON NULL INPUT
+	SECURITY INVOKER
+	COST 1
+	AS $$
+import tlsh
+return tlsh.diff(a, b)
+$$;
+-- ddl-end --
+ALTER FUNCTION public.tlshc(text,text) OWNER TO postgres;
+-- ddl-end --
+
+-- object: public.tlsht | type: FUNCTION --
+-- DROP FUNCTION IF EXISTS public.tlsht(IN text,IN text,IN int4,int4) CASCADE;
+CREATE FUNCTION public.tlsht (IN filter text, IN hash text, IN threshold int4,  maxrows int4)
+	RETURNS SETOF public.fuzzy_hash
+	LANGUAGE plpython3u
+	IMMUTABLE LEAKPROOF
+	RETURNS NULL ON NULL INPUT
+	SECURITY INVOKER
+	COST 1
+	ROWS 1000
+	AS $$
+import tlsh
+param = ["TLSH"]
+#param[0] = filter
+#plan = plpy.prepare("SELECT * FROM fuzzy_hash WHERE type <> $1", ["text"])
+#rv = plan.execute(param, maxrows)
+rv = plpy.execute("SELECT * FROM fuzzy_hash", 1000)
+r = []
+for x in rv:
+    if tlsh.diff(x["value"], hash) < threshold:
+        r.append(x)
+return r
+$$;
+-- ddl-end --
+ALTER FUNCTION public.tlsht(IN text,IN text,IN int4,int4) OWNER TO postgres;
 -- ddl-end --
 
 

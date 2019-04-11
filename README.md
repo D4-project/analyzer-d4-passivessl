@@ -4,4 +4,5 @@ analyzer-d4-passivessl fetch a redis feed of certificate and TLS sessions and ma
 ```bash
 go get github.com/gomodule/redigo/redis
 go get github.com/lib/pq
+sudo apt install postgresal-plpython3-10
 ```

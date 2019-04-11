@@ -100,11 +100,20 @@ func main() {
 			s := sessionRecord{}
 			_ = json.Unmarshal([]byte(dat), &s)
 
-			if len(s.Certificates) > 0 {
+			if isValid(&s){
+				// Create ja3* records
+				err = insertJA3(&s)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Could not insert JA3 into DB: %q", err))
+				}
 				// Insert Session
 				ids, err := insertSession(&s)
 				if err != nil {
 					log.Fatal(fmt.Sprintf("Insert Sessions into DB failed: %q", err))
+				}
+				err = insertFuzzyHash(&s, ids)
+				if err != nil {
+					log.Fatal(fmt.Sprintf("Insert Fuzzy Hash into DB failed: %q", err))
 				}
 				// Attempt to roughly build a chain of trust
 				session := buildChain(&s)
@@ -119,15 +128,21 @@ func main() {
 				if err != nil {
 					log.Fatal(fmt.Sprintf("Could not link Certs and Session into DB: %q", err))
 				}
-
-				// Create ja3* records
-				err = insertJA3(session)
-				if err != nil {
-					log.Fatal(fmt.Sprintf("Could not insert JA3 into DB: %q", err))
-				}
 			}
 		}
 	}
+}
+
+func isValid(s * sessionRecord) bool {
+	// Relationships
+	if len(s.Certificates) < 1  || s.JA3Digest == "" || s.JA3 == "" {
+		return false
+	}
+	// Basic informations
+	if s.ClientPort == "" || s.ServerPort == "" || s.ServerIP == "" || s.ClientIP == "" {
+		return false
+	}
+	return true
 }
 
 func insertJA3(s *sessionRecord) error {
@@ -138,6 +153,15 @@ func insertJA3(s *sessionRecord) error {
 	}
 	q = `INSERT INTO "ja3" (hash, raw, type) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`
 	_, err = db.Exec(q, s.JA3SDigest, s.JA3S, "ja3s")
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func insertFuzzyHash(s *sessionRecord, ids int64) error {
+	q := `INSERT INTO "fuzzy_hash" (type, value, "id_sessionRecord") VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`
+	_, err := db.Exec(q, "TLSH", s.TLSH, ids)
 	if err != nil {
 		return err
 	}
@@ -321,9 +345,9 @@ func insertCertificates(s *sessionRecord) ([]string, error) {
 }
 
 func insertSession(s *sessionRecord) (int64, error) {
-	q := `INSERT INTO "sessionRecord" (dst_ip, src_ip, dst_port, src_port, timestamp) VALUES ($1, $2, $3, $4, $5) RETURNING id`
+	q := `INSERT INTO "sessionRecord" (dst_ip, src_ip, dst_port, src_port, timestamp, hash_ja3) VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`
 	var id int64
-	err := db.QueryRow(q, s.ServerIP, s.ClientIP, s.ServerPort, s.ClientPort, s.Timestamp).Scan(&id)
+	err := db.QueryRow(q, s.ServerIP, s.ClientIP, s.ServerPort, s.ClientPort, s.Timestamp, s.JA3Digest).Scan(&id)
 	if err != nil {
 		return 0, err
 	}
@@ -339,7 +363,7 @@ func initRedis() {
 }
 
 func initDB() {
-	connStr := "user=postgres password=postgres dbname=new_database"
+	connStr := "user=postgres password=postgres dbname=passive_ssl"
 	err := errors.New("")
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
