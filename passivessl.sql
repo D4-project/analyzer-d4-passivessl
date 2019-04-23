@@ -308,7 +308,7 @@ plan = plpy.prepare("SELECT * FROM fuzzy_hash WHERE type <> $1", ["text"])
 rv = plan.execute(["filter"], maxrows)
 r = []
 for x in rv:
-    if tlsh.diff(x["value"], hash) > threshold:
+    if tlsh.diff(x["value"], hash) < threshold:
         r.append(x)
 return r
 $$;
