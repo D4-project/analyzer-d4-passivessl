@@ -293,8 +293,8 @@ ALTER FUNCTION public.tlshc(text,text) OWNER TO postgres;
 -- ddl-end --
 
 -- object: public.tlsht | type: FUNCTION --
--- DROP FUNCTION IF EXISTS public.tlsht(IN text,IN text,IN int4,int4) CASCADE;
-CREATE FUNCTION public.tlsht (IN filter text, IN hash text, IN threshold int4,  maxrows int4)
+-- DROP FUNCTION IF EXISTS public.tlsht(IN text,IN text,IN int4,IN int4) CASCADE;
+CREATE FUNCTION public.tlsht (IN filter text, IN hash text, IN threshold int4, IN maxrows int4)
 	RETURNS SETOF public.fuzzy_hash
 	LANGUAGE plpython3u
 	IMMUTABLE LEAKPROOF
@@ -304,19 +304,16 @@ CREATE FUNCTION public.tlsht (IN filter text, IN hash text, IN threshold int4,  
 	ROWS 1000
 	AS $$
 import tlsh
-param = ["TLSH"]
-#param[0] = filter
-#plan = plpy.prepare("SELECT * FROM fuzzy_hash WHERE type <> $1", ["text"])
-#rv = plan.execute(param, maxrows)
-rv = plpy.execute("SELECT * FROM fuzzy_hash", 1000)
+plan = plpy.prepare("SELECT * FROM fuzzy_hash WHERE type <> $1", ["text"])
+rv = plan.execute(["filter"], maxrows)
 r = []
 for x in rv:
-    if tlsh.diff(x["value"], hash) < threshold:
+    if tlsh.diff(x["value"], hash) > threshold:
         r.append(x)
 return r
 $$;
 -- ddl-end --
-ALTER FUNCTION public.tlsht(IN text,IN text,IN int4,int4) OWNER TO postgres;
+ALTER FUNCTION public.tlsht(IN text,IN text,IN int4,IN int4) OWNER TO postgres;
 -- ddl-end --
 
 
