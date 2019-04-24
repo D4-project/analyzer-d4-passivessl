@@ -11,69 +11,183 @@ import (
 	"database/sql/driver"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
-	_ "github.com/lib/pq"
+	"io"
 	"io/ioutil"
 	"log"
 	"math/big"
+	"net"
+	"os"
+	"os/signal"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/gomodule/redigo/redis"
+	_ "github.com/lib/pq"
 )
 
-type BigNumber big.Int
+type (
+	conf struct {
+		redisHost    string
+		redisPort    string
+		redisDB      int
+		redisQueue   string
+		postgresUser string
+		postgresPWD  string
+		postgresHost string
+		postgresPort string
+		postgresDB   string
+		certPath     string
+	}
 
-type certMapElm struct {
-	CertHash string
-	chain    chain
-	*x509.Certificate
-}
+	BigNumber big.Int
 
-type sessionRecord struct {
-	ServerIP     string
-	ServerPort   string
-	ClientIP     string
-	ClientPort   string
-	TLSH         string
-	Timestamp    time.Time
-	JA3          string
-	JA3Digest    string
-	JA3S         string
-	JA3SDigest   string
-	Certificates []certMapElm
-}
+	certMapElm struct {
+		CertHash string
+		chain    chain
+		*x509.Certificate
+	}
 
-type chain struct {
-	isValid bool
-	isSS    bool
-	s       string
-}
+	sessionRecord struct {
+		ServerIP     string
+		ServerPort   string
+		ClientIP     string
+		ClientPort   string
+		TLSH         string
+		Timestamp    time.Time
+		JA3          string
+		JA3Digest    string
+		JA3S         string
+		JA3SDigest   string
+		Certificates []certMapElm
+	}
 
-var db *sql.DB
-//var db *sqlx.DB
-var cr redis.Conn
+	chain struct {
+		isValid bool
+		isSS    bool
+		s       string
+	}
+)
 
-var connectRedis = false
-var connectDB = true
+var (
+	db           *sql.DB
+	confdir      = flag.String("c", "conf.sample", "configuration directory")
+	connectRedis = true
+	cr           redis.Conn
+)
 
 func main() {
-	if connectDB {
-		initDB()
-		defer db.Close()
+	// Control Chan
+	s := make(chan os.Signal, 1)
+	signal.Notify(s, os.Interrupt, os.Kill)
+
+	// Usage and flags
+	flag.Usage = func() {
+		fmt.Printf("analyzer-d4-passivessl - Passive SSL analyzer:\n\n")
+		fmt.Printf(" Fetch data from sensor-d4-tls-fingerprinting and push it into d4-passivessl-server\n")
+		fmt.Printf("\n")
+		fmt.Printf("Usage:\n\n analyzer-d4-passivessl -c  config_directory\n")
+		fmt.Printf("\n")
+		fmt.Printf("Configuration:\n\n")
+		fmt.Printf(" The configuration settings are stored in files in the configuration directory\n")
+		fmt.Printf(" specified with the -c command line switch.\n\n")
+		fmt.Printf("Files in the configuration directory:\n")
+		fmt.Printf("\n")
+		fmt.Printf(" redis - empty if not used.\n")
+		fmt.Printf("       | host:port/db\n")
+		fmt.Printf(" redis_queue - type and uuid of the redis queue\n")
+		fmt.Printf("          | type:uuid \n")
+		fmt.Printf(" postgres - postgres database\n")
+		fmt.Printf("          | user:password@host:port/db\n")
+		fmt.Printf(" certfolder - absolute path to the folder containing certificates\n")
+		fmt.Printf("          | /.... \n")
+		fmt.Printf("\n")
+		flag.PrintDefaults()
 	}
+
+	// Config
+	c := conf{}
+	flag.Parse()
+	if flag.NFlag() == 0 || *confdir == "" {
+		flag.Usage()
+		os.Exit(1)
+	} else {
+		*confdir = strings.TrimSuffix(*confdir, "/")
+		*confdir = strings.TrimSuffix(*confdir, "\\")
+	}
+
+	// Parse Redis Config
+	tmp := readConfFile(*confdir, "redis")
+	ss := strings.Split(string(tmp), "/")
+	if len(ss) <= 1 {
+		log.Fatal("Missing Database in Redis config: should be host:port/database_name")
+	}
+	c.redisDB, _ = strconv.Atoi(ss[1])
+	var ret bool
+	ret, ss[0] = isNet(ss[0])
+	if !ret {
+		sss := strings.Split(string(ss[0]), ":")
+		c.redisHost = sss[0]
+		c.redisPort = sss[1]
+	}
+	c.redisQueue = string(readConfFile(*confdir, "redis_queue"))
+
+	// Parse DB Config
+	tmp = readConfFile(*confdir, "postgres")
+	ss = strings.Split(string(tmp), "/")
+	if len(ss) <= 1 {
+		log.Fatal("Missing Database in Postgres config: should be user:pwd@host:port/database_name")
+	}
+	c.postgresDB = ss[1]
+	sssat := strings.Split(ss[0], "@")
+	if len(ss) <= 1 {
+		log.Fatal("Malformed postgres config: should be user:pwd@host:port/database_name")
+	}
+	sssu := strings.Split(sssat[0], ":")
+	if len(ss) <= 1 {
+		log.Fatal("Malformed postgres config: should be user:pwd@host:port/database_name")
+	}
+	c.postgresUser = sssu[0]
+	c.postgresPWD = sssu[1]
+	ret, ssh := isNet(sssat[1])
+	if !ret {
+		sssh := strings.Split(string(ssh), ":")
+		c.postgresHost = sssh[0]
+		c.postgresPort = sssh[1]
+	}
+
+	// Parse Certificate Folder
+	c.certPath = string(readConfFile(*confdir, "certfolder"))
+
+	// DB
+	initDB(c.postgresUser, c.postgresPWD, c.postgresHost, c.postgresPort, c.postgresDB)
+	defer db.Close()
 
 	var jsonPath string
 
+	// Redis
 	if connectRedis {
-		initRedis()
-		//defer cr.Close()
+		initRedis(c.redisHost, c.redisPort, c.redisDB)
+		defer cr.Close()
 		// pop redis queue
 		for {
 			err := errors.New("")
-			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:ja3-jl:0894517855f047d2a77b4473d3a9cc5b"))
+			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:"+c.redisQueue))
 			if err != nil {
 				log.Fatal("Queue processed")
+			}
+			processFile(jsonPath)
+
+			// Exit Signal Handle
+			select {
+			case <-s:
+				fmt.Println("Exiting...")
+				os.Exit(0)
+			default:
+				continue
 			}
 		}
 
@@ -85,57 +199,66 @@ func main() {
 		if err != nil {
 			log.Fatal(err)
 		}
-
 		for _, f := range files {
-
 			path[1] = f.Name()
 			jsonPath = strings.Join(path, "/")
+			processFile(jsonPath)
 
-			// read corresponding json file
-			dat, err := ioutil.ReadFile(jsonPath)
-			if err != nil {
-				log.Fatal(err)
-			}
-			// Unmarshal JSON file
-			s := sessionRecord{}
-			_ = json.Unmarshal([]byte(dat), &s)
-
-			if isValid(&s){
-				// Create ja3* records
-				err = insertJA3(&s)
-				if err != nil {
-					log.Fatal(fmt.Sprintf("Could not insert JA3 into DB: %q", err))
-				}
-				// Insert Session
-				ids, err := insertSession(&s)
-				if err != nil {
-					log.Fatal(fmt.Sprintf("Insert Sessions into DB failed: %q", err))
-				}
-				err = insertFuzzyHash(&s, ids)
-				if err != nil {
-					log.Fatal(fmt.Sprintf("Insert Fuzzy Hash into DB failed: %q", err))
-				}
-				// Attempt to roughly build a chain of trust
-				session := buildChain(&s)
-
-				// Insert Certificates
-				idc, err := insertCertificates(session)
-				if err != nil {
-					log.Fatal(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
-				}
-				// Create the relationship between certificates and sessions
-				err = linkSessionCerts(ids, idc)
-				if err != nil {
-					log.Fatal(fmt.Sprintf("Could not link Certs and Session into DB: %q", err))
-				}
+			// Exit Signal Handle
+			select {
+			case <-s:
+				fmt.Println("Exiting...")
+				os.Exit(0)
 			}
 		}
 	}
 }
 
-func isValid(s * sessionRecord) bool {
+func processFile(p string) bool {
+	// read corresponding json file
+	dat, err := ioutil.ReadFile(p)
+	if err != nil {
+		log.Fatal(err)
+	}
+	// Unmarshal JSON file
+	s := sessionRecord{}
+	_ = json.Unmarshal([]byte(dat), &s)
+
+	if isValid(&s) {
+		// Create ja3* records
+		err = insertJA3(&s)
+		if err != nil {
+			log.Fatal(fmt.Sprintf("Could not insert JA3 into DB: %q", err))
+		}
+		// Insert Session
+		ids, err := insertSession(&s)
+		if err != nil {
+			log.Fatal(fmt.Sprintf("Insert Sessions into DB failed: %q", err))
+		}
+		err = insertFuzzyHash(&s, ids)
+		if err != nil {
+			log.Fatal(fmt.Sprintf("Insert Fuzzy Hash into DB failed: %q", err))
+		}
+		// Attempt to roughly build a chain of trust
+		session := buildChain(&s)
+
+		// Insert Certificates
+		idc, err := insertCertificates(session)
+		if err != nil {
+			log.Fatal(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
+		}
+		// Create the relationship between certificates and sessions
+		err = linkSessionCerts(ids, idc)
+		if err != nil {
+			log.Fatal(fmt.Sprintf("Could not link Certs and Session into DB: %q", err))
+		}
+	}
+	return true
+}
+
+func isValid(s *sessionRecord) bool {
 	// Relationships
-	if len(s.Certificates) < 1  || s.JA3Digest == "" || s.JA3 == "" {
+	if len(s.Certificates) < 1 || s.JA3Digest == "" || s.JA3 == "" {
 		return false
 	}
 	// Basic informations
@@ -354,16 +477,16 @@ func insertSession(s *sessionRecord) (int64, error) {
 	return id, nil
 }
 
-func initRedis() {
+func initRedis(host string, port string, d int) {
 	err := errors.New("")
-	cr, err = redis.Dial("tcp", ":6380", redis.DialDatabase(2))
+	cr, err = redis.Dial("tcp", host+":"+port, redis.DialDatabase(d))
 	if err != nil {
 		panic(err)
 	}
 }
 
-func initDB() {
-	connStr := "user=postgres password=postgres dbname=passive_ssl"
+func initDB(u string, pa string, h string, po string, d string) {
+	connStr := "host=" + h + " port=" + po + " user=" + u + " password=" + pa + " dbname=" + d
 	err := errors.New("")
 	db, err = sql.Open("postgres", connStr)
 	if err != nil {
@@ -391,4 +514,87 @@ func (t *sessionRecord) String() string {
 	}
 	buf.WriteString(fmt.Sprintf("---------------SESSION  END--------------------\n"))
 	return buf.String()
+}
+
+func isNet(host string) (bool, string) {
+	// DNS regex
+	validDNS := regexp.MustCompile(`^(([a-zA-Z]{1})|([a-zA-Z]{1}[a-zA-Z]{1})|([a-zA-Z]{1}[0-9]{1})|([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z
+ ]{2,3})$`)
+	// Check ipv6
+	if strings.HasPrefix(host, "[") {
+		// Parse an IP-Literal in RFC 3986 and RFC 6874.
+		// E.g., "[fe80::1]:80".
+		i := strings.LastIndex(host, "]")
+		if i < 0 {
+			log.Fatal("Unmatched [ in destination config")
+			return false, ""
+		}
+		if !validPort(host[i+1:]) {
+			log.Fatal("No valid port specified")
+			return false, ""
+		}
+		// trim brackets
+		if net.ParseIP(strings.Trim(host[:i+1], "[]")) != nil {
+			log.Fatal(fmt.Sprintf("Server IP: %s, Server Port: %s\n", host[:i+1], host[i+1:]))
+			return true, host
+		}
+	} else {
+		// Ipv4 or DNS name
+		ss := strings.Split(string(host), ":")
+		if len(ss) > 1 {
+			if !validPort(":" + ss[1]) {
+				log.Fatal("No valid port specified")
+				return false, ""
+			}
+			if net.ParseIP(ss[0]) != nil {
+				log.Fatal(fmt.Sprintf("Server IP: %s, Server Port: %s\n", ss[0], ss[1]))
+				return true, host
+			} else if validDNS.MatchString(ss[0]) {
+				log.Fatal(fmt.Sprintf("DNS: %s, Server Port: %s\n", ss[0], ss[1]))
+				return true, host
+			}
+		}
+	}
+	return false, host
+}
+
+// Reusing code from net.url
+// validOptionalPort reports whether port is either an empty string
+// or matches /^:\d*$/
+func validPort(port string) bool {
+	if port == "" {
+		return false
+	}
+	if port[0] != ':' {
+		return false
+	}
+	for _, b := range port[1:] {
+		if b < '0' || b > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func readConfFile(p string, fileName string) []byte {
+	f, err := os.OpenFile("./"+p+"/"+fileName, os.O_RDWR|os.O_CREATE, 0666)
+	defer f.Close()
+	if err != nil {
+		log.Fatal(err)
+	}
+	data := make([]byte, 100)
+	count, err := f.Read(data)
+	if err != nil {
+		if err != io.EOF {
+			log.Fatal(err)
+		}
+	}
+	if count == 0 {
+		log.Fatal(fileName + " is empty.")
+	}
+	if err := f.Close(); err != nil {
+		log.Fatal(err)
+	}
+	// trim \n if present
+	return bytes.TrimSuffix(data[:count], []byte("\n"))
 }
