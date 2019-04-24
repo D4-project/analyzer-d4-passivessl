@@ -179,7 +179,7 @@ func main() {
 			if err != nil {
 				log.Fatal("Queue processed")
 			}
-			processFile(jsonPath)
+			processFile(c.certPath, jsonPath)
 
 			// Exit Signal Handle
 			select {
@@ -202,7 +202,7 @@ func main() {
 		for _, f := range files {
 			path[1] = f.Name()
 			jsonPath = strings.Join(path, "/")
-			processFile(jsonPath)
+			processFile(c.certPath, jsonPath)
 
 			// Exit Signal Handle
 			select {
@@ -214,7 +214,7 @@ func main() {
 	}
 }
 
-func processFile(p string) bool {
+func processFile(fp string, p string) bool {
 	// read corresponding json file
 	dat, err := ioutil.ReadFile(p)
 	if err != nil {
@@ -243,7 +243,7 @@ func processFile(p string) bool {
 		session := buildChain(&s)
 
 		// Insert Certificates
-		idc, err := insertCertificates(session)
+		idc, err := insertCertificates(fp, session)
 		if err != nil {
 			log.Fatal(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
 		}
@@ -429,9 +429,9 @@ func unique(s []certMapElm) []certMapElm {
 	return list
 }
 
-func insertCertificate(c certMapElm) (string, error) {
+func insertCertificate(fp string, c certMapElm) (string, error) {
 	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
-	_, err := db.Exec(q, c.CertHash, c.Certificate.IsCA, c.chain.isSS, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), c.chain.s, c.chain.isValid, getFullPath(c.CertHash))
+	_, err := db.Exec(q, c.CertHash, c.Certificate.IsCA, c.chain.isSS, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), c.chain.s, c.chain.isValid, getFullPath(fp, c.CertHash))
 	if err != nil {
 		return c.CertHash, err
 	}
@@ -451,14 +451,14 @@ func insertCertificate(c certMapElm) (string, error) {
 
 // getFullPath takes a certificate's hash and return the full path to
 // its location on disk
-func getFullPath(h string) string {
-	return "TODO PATH"
+func getFullPath(c string, h string) string {
+	return c+h
 }
 
-func insertCertificates(s *sessionRecord) ([]string, error) {
+func insertCertificates(fp string, s *sessionRecord) ([]string, error) {
 	var inserted []string
 	for _, certificate := range s.Certificates {
-		tmp, err := insertCertificate(certificate)
+		tmp, err := insertCertificate(fp, certificate)
 		inserted = append(inserted, tmp)
 		if err != nil {
 			return inserted, err
