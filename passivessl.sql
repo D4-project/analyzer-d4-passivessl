@@ -108,7 +108,7 @@ CREATE TABLE public."sessionRecord"(
 	dst_port int4 NOT NULL,
 	src_port int4 NOT NULL,
 	hash_ja3 bytea NOT NULL,
-	"timestamp" time(0) with time zone,
+	"timestamp" timestamp(0) with time zone,
 	CONSTRAINT "sessionRecord_pk" PRIMARY KEY (id)
 
 );
