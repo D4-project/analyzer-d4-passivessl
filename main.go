@@ -175,11 +175,12 @@ func main() {
 		// pop redis queue
 		for {
 			err := errors.New("")
-			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:"+c.redisQueue))
+			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:ja3-jl:"+c.redisQueue))
 			if err != nil {
 				time.Sleep(30 * time.Second)
+			} else {
+				processFile(c.certPath, jsonPath)
 			}
-			processFile(c.certPath, jsonPath)
 
 			// Exit Signal Handle
 			select {
@@ -439,8 +440,8 @@ func insertCertificate(fp string, c certMapElm) (string, error) {
 	if err != nil {
 		return c.CertHash, err
 	}
-	fmt.Println(c.CertHash)
-	fmt.Println(key)
+	//fmt.Println(c.CertHash)
+	//fmt.Println(key)
 	q = `INSERT INTO "many_certificate_has_many_public_key" ("hash_certificate", "hash_public_key") VALUES ($1, $2) ON CONFLICT DO NOTHING `
 	_, err = db.Exec(q, c.CertHash, key)
 	if err != nil {
