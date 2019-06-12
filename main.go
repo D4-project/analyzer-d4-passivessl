@@ -177,7 +177,7 @@ func main() {
 			err := errors.New("")
 			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:"+c.redisQueue))
 			if err != nil {
-				log.Fatal("Queue processed")
+				time.Sleep(30 * time.Second)
 			}
 			processFile(c.certPath, jsonPath)
 
@@ -452,7 +452,7 @@ func insertCertificate(fp string, c certMapElm) (string, error) {
 // getFullPath takes a certificate's hash and return the full path to
 // its location on disk
 func getFullPath(c string, h string) string {
-	return c+h
+	return c + h
 }
 
 func insertCertificates(fp string, s *sessionRecord) ([]string, error) {
