@@ -268,6 +268,7 @@ func processDER(fp string, p string) bool {
 			goto I
 		default:
 			fmt.Println("failed to parse certificate: " + err.Error())
+			return false
 		}
 	}
 
@@ -277,21 +278,30 @@ I:
 	h.Write(cert.Raw)
 	c := certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))}
 	// Insert Certificate
-	err = insertLeafCertificate(fp, c)
+	err = insertLeafCertificate(p, c)
 	if err != nil {
-		log.Fatal(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
+		// Not stopping on failed insertion
+		log.Println(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
 	}
 
 	return true
 }
 
 func insertLeafCertificate(fp string, c certMapElm) error {
-	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
-	_, err := db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, getFullPath(fp, c.CertHash))
-	if err != nil {
-		return err
-	}
 	key, err := insertPublicKey(*c.Certificate)
+	if err != nil {
+		// Not stopping on Non Fatal Errors
+		switch err := err.(type) {
+		case x509.NonFatalErrors:
+			goto J
+		default:
+			fmt.Println("failed to Insert Key: " + err.Error())
+			return err
+		}
+	}
+J:
+	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
+	_, err = db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, getFullPath(fp, c.CertHash))
 	if err != nil {
 		return err
 	}
@@ -393,7 +403,7 @@ func insertPublicKey(c x509.Certificate) (string, error) {
 	pub, err := x509.ParsePKIXPublicKey(c.RawSubjectPublicKeyInfo)
 	hash := fmt.Sprintf("%x", sha256.Sum256(c.RawSubjectPublicKeyInfo))
 	if err != nil {
-		return hash, nil
+		return hash, err
 	}
 
 	switch pub := pub.(type) {
