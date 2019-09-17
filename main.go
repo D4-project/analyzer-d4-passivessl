@@ -5,8 +5,8 @@ import (
 	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"crypto/sha1"
 	"crypto/sha256"
-	"crypto/x509"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
@@ -20,10 +20,13 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/gallypette/certificate-transparency-go/x509"
 
 	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
@@ -41,9 +44,11 @@ type (
 		postgresPort string
 		postgresDB   string
 		certPath     string
+		format       string
+		recursive    bool
 	}
 
-	BigNumber big.Int
+	bigNumber big.Int
 
 	certMapElm struct {
 		CertHash string
@@ -73,10 +78,12 @@ type (
 )
 
 var (
-	db           *sql.DB
-	confdir      = flag.String("c", "conf.sample", "configuration directory")
-	connectRedis = true
-	cr           redis.Conn
+	db        *sql.DB
+	confdir   = flag.String("c", "conf.sample", "configuration directory")
+	recursive = flag.Bool("r", false, "should it open the directory recursively")
+	format    = flag.String("f", "json", "certificate file format [json, crt, der]")
+	pull      = flag.Bool("p", true, "pull from redis?")
+	cr        redis.Conn
 )
 
 func main() {
@@ -119,25 +126,9 @@ func main() {
 		*confdir = strings.TrimSuffix(*confdir, "\\")
 	}
 
-	// Parse Redis Config
-	tmp := readConfFile(*confdir, "redis")
-	ss := strings.Split(string(tmp), "/")
-	if len(ss) <= 1 {
-		log.Fatal("Missing Database in Redis config: should be host:port/database_name")
-	}
-	c.redisDB, _ = strconv.Atoi(ss[1])
-	var ret bool
-	ret, ss[0] = isNet(ss[0])
-	if !ret {
-		sss := strings.Split(string(ss[0]), ":")
-		c.redisHost = sss[0]
-		c.redisPort = sss[1]
-	}
-	c.redisQueue = string(readConfFile(*confdir, "redis_queue"))
-
 	// Parse DB Config
-	tmp = readConfFile(*confdir, "postgres")
-	ss = strings.Split(string(tmp), "/")
+	tmp := readConfFile(*confdir, "postgres")
+	ss := strings.Split(string(tmp), "/")
 	if len(ss) <= 1 {
 		log.Fatal("Missing Database in Postgres config: should be user:pwd@host:port/database_name")
 	}
@@ -161,6 +152,8 @@ func main() {
 
 	// Parse Certificate Folder
 	c.certPath = string(readConfFile(*confdir, "certfolder"))
+	c.recursive = *recursive
+	c.format = *format
 
 	// DB
 	initDB(c.postgresUser, c.postgresPWD, c.postgresHost, c.postgresPort, c.postgresDB)
@@ -168,8 +161,22 @@ func main() {
 
 	var jsonPath string
 
-	// Redis
-	if connectRedis {
+	if *pull { // Redis
+		// Parse Redis Config
+		tmp := readConfFile(*confdir, "redis")
+		ss := strings.Split(string(tmp), "/")
+		if len(ss) <= 1 {
+			log.Fatal("Missing Database in Redis config: should be host:port/database_name")
+		}
+		c.redisDB, _ = strconv.Atoi(ss[1])
+		var ret bool
+		ret, ss[0] = isNet(ss[0])
+		if !ret {
+			sss := strings.Split(string(ss[0]), ":")
+			c.redisHost = sss[0]
+			c.redisPort = sss[1]
+		}
+		c.redisQueue = string(readConfFile(*confdir, "redis_queue"))
 		initRedis(c.redisHost, c.redisPort, c.redisDB)
 		defer cr.Close()
 		// pop redis queue
@@ -177,11 +184,8 @@ func main() {
 			err := errors.New("")
 			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:ja3-jl:"+c.redisQueue))
 			if err != nil {
-				time.Sleep(30 * time.Second)
-			} else {
-				processFile(c.certPath, jsonPath)
+				time.Sleep(2 * time.Second)
 			}
-
 			// Exit Signal Handle
 			select {
 			case <-s:
@@ -191,31 +195,123 @@ func main() {
 				continue
 			}
 		}
+	} else { // Files
+		if c.recursive {
+			err := filepath.Walk(c.certPath,
+				func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					if !info.IsDir() {
+						processFile(c.certPath, path, c.format)
+					}
+					return nil
+				})
+			if err != nil {
+				log.Println(err)
+			}
+		} else {
+			var path []string
+			path = append(path, "./sessions")
+			path = append(path, "")
+			files, err := ioutil.ReadDir(path[0])
+			if err != nil {
+				log.Fatal(err)
+			}
+			for _, f := range files {
+				path[1] = f.Name()
+				jsonPath = strings.Join(path, "/")
+				processFile(c.certPath, jsonPath, c.format)
 
-	} else {
-		var path []string
-		path = append(path, "./sessions")
-		path = append(path, "")
-		files, err := ioutil.ReadDir(path[0])
-		if err != nil {
-			log.Fatal(err)
-		}
-		for _, f := range files {
-			path[1] = f.Name()
-			jsonPath = strings.Join(path, "/")
-			processFile(c.certPath, jsonPath)
-
-			// Exit Signal Handle
-			select {
-			case <-s:
-				fmt.Println("Exiting...")
-				os.Exit(0)
+				// Exit Signal Handle
+				select {
+				case <-s:
+					fmt.Println("Exiting...")
+					os.Exit(0)
+				}
 			}
 		}
+
 	}
 }
 
-func processFile(fp string, p string) bool {
+func processFile(fp string, p string, f string) {
+	switch f {
+	case "json":
+		processJSON(fp, p)
+		break
+	case "der":
+		processDER(fp, p)
+		break
+	case "crt":
+		processCRT(fp, p)
+		break
+	}
+}
+
+func processDER(fp string, p string) bool {
+	// read corresponding der file
+	dat, err := ioutil.ReadFile(p)
+	if err != nil {
+		log.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(dat)
+	if err != nil {
+		// Not stopping on Non Fatal Errors
+		switch err := err.(type) {
+		case x509.NonFatalErrors:
+			// Stopping on Unknown PK Algo
+			if cert.PublicKeyAlgorithm == 0 {
+				fmt.Println("Unknown Public Key Algorithm, skipping key (most likely GOST R 14)")
+				break
+			}
+			goto I
+		default:
+			fmt.Println("failed to parse certificate: " + err.Error())
+		}
+	}
+
+I:
+	// Cert elem
+	h := sha1.New()
+	h.Write(cert.Raw)
+	c := certMapElm{Certificate: cert, CertHash: fmt.Sprintf("%x", h.Sum(nil))}
+	// Insert Certificate
+	err = insertLeafCertificate(fp, c)
+	if err != nil {
+		log.Fatal(fmt.Sprintf("Insert Certificate into DB failed: %q", err))
+	}
+
+	return true
+}
+
+func insertLeafCertificate(fp string, c certMapElm) error {
+	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
+	_, err := db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, getFullPath(fp, c.CertHash))
+	if err != nil {
+		return err
+	}
+	key, err := insertPublicKey(*c.Certificate)
+	if err != nil {
+		return err
+	}
+	//fmt.Println(c.CertHash)
+	//fmt.Println(key)
+	q = `INSERT INTO "many_certificate_has_many_public_key" ("hash_certificate", "hash_public_key") VALUES ($1, $2) ON CONFLICT DO NOTHING `
+	_, err = db.Exec(q, c.CertHash, key)
+	if err != nil {
+		fmt.Println(c.CertHash)
+		return err
+	}
+	return nil
+}
+
+func processCRT(fp string, p string) bool {
+
+	return true
+}
+
+func processJSON(fp string, p string) bool {
 	// read corresponding json file
 	dat, err := ioutil.ReadFile(p)
 	if err != nil {
@@ -303,19 +399,24 @@ func insertPublicKey(c x509.Certificate) (string, error) {
 	switch pub := pub.(type) {
 	case *rsa.PublicKey:
 		q := `INSERT INTO "public_key" (hash, type, modulus, exponent, modulus_size) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`
-		_, err := db.Exec(q, hash, "RSA", (*BigNumber)(pub.N), pub.E, pub.Size())
+		_, err := db.Exec(q, hash, "RSA", (*bigNumber)(pub.N), pub.E, pub.Size())
 		if err != nil {
 			return hash, err
 		}
+		//  else {
+		// Adds the moduli into Redis for analysis
+		// cr.Send("HMSET", hash, "moduli", (*BigNumber)(pub.N))
+		//cr.Send("LPUSH", "albums", "1")
+		// }
 	case *dsa.PublicKey:
 		q := `INSERT INTO "public_key" (hash, type, "G", "P", "Q", "Y") VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`
-		_, err := db.Exec(q, hash, "DSA", (*BigNumber)(pub.Parameters.G), (*BigNumber)(pub.Parameters.P), (*BigNumber)(pub.Parameters.Q), (*BigNumber)(pub.Y))
+		_, err := db.Exec(q, hash, "DSA", (*bigNumber)(pub.Parameters.G), (*bigNumber)(pub.Parameters.P), (*bigNumber)(pub.Parameters.Q), (*bigNumber)(pub.Y))
 		if err != nil {
 			return hash, err
 		}
 	case *ecdsa.PublicKey:
 		q := `INSERT INTO "public_key" (hash, type, "Y", "X", "P", "N", "B", "bitsize", "Gx", "Gy", "curve_name") VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) ON CONFLICT DO NOTHING`
-		_, err := db.Exec(q, hash, "ECDSA", (*BigNumber)(pub.Y), (*BigNumber)(pub.X), (*BigNumber)(pub.Curve.Params().P), (*BigNumber)(pub.Curve.Params().N), (*BigNumber)(pub.Curve.Params().B), pub.Curve.Params().BitSize, (*BigNumber)(pub.Curve.Params().Gx), (*BigNumber)(pub.Curve.Params().Gy), pub.Params().Name)
+		_, err := db.Exec(q, hash, "ECDSA", (*bigNumber)(pub.Y), (*bigNumber)(pub.X), (*bigNumber)(pub.Curve.Params().P), (*bigNumber)(pub.Curve.Params().N), (*bigNumber)(pub.Curve.Params().B), pub.Curve.Params().BitSize, (*bigNumber)(pub.Curve.Params().Gx), (*bigNumber)(pub.Curve.Params().Gy), pub.Params().Name)
 		if err != nil {
 			return hash, err
 		}
@@ -325,7 +426,7 @@ func insertPublicKey(c x509.Certificate) (string, error) {
 	return hash, nil
 }
 
-func (bn *BigNumber) Value() (driver.Value, error) {
+func (bn *bigNumber) Value() (driver.Value, error) {
 	return driver.Value((*big.Int)(bn).Text(10)), nil
 }
 
