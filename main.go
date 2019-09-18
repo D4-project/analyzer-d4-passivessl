@@ -301,7 +301,7 @@ func insertLeafCertificate(fp string, c certMapElm) error {
 	}
 J:
 	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
-	_, err = db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, getFullPath(fp, c.CertHash))
+	_, err = db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, fp)
 	if err != nil {
 		return err
 	}
