@@ -1,7 +1,10 @@
 package main
 
 import (
+	"archive/tar"
+	"bufio"
 	"bytes"
+	"compress/gzip"
 	"crypto/dsa"
 	"crypto/ecdsa"
 	"crypto/rsa"
@@ -46,6 +49,7 @@ type (
 		certPath     string
 		format       string
 		recursive    bool
+		tarball      bool
 	}
 
 	bigNumber big.Int
@@ -81,6 +85,7 @@ var (
 	db        *sql.DB
 	confdir   = flag.String("c", "conf.sample", "configuration directory")
 	recursive = flag.Bool("r", false, "should it open the directory recursively")
+	tarball   = flag.Bool("t", false, "is it a tar archive")
 	format    = flag.String("f", "json", "certificate file format [json, crt, der]")
 	pull      = flag.Bool("p", true, "pull from redis?")
 	cr        redis.Conn
@@ -153,6 +158,7 @@ func main() {
 	// Parse Certificate Folder
 	c.certPath = string(readConfFile(*confdir, "certfolder"))
 	c.recursive = *recursive
+	c.tarball = *tarball
 	c.format = *format
 
 	// DB
@@ -203,12 +209,29 @@ func main() {
 						return err
 					}
 					if !info.IsDir() {
-						processFile(c.certPath, path, c.format)
+						fd, err := os.Open(path)
+						if err != nil {
+							log.Fatal(err)
+						}
+						bf := bufio.NewReader(fd)
+						processFile(bf, path, c.format)
 					}
 					return nil
 				})
 			if err != nil {
 				log.Println(err)
+			}
+		} else if c.tarball {
+			fd, err := os.Stat(c.certPath)
+			if err != nil {
+				log.Fatal(err)
+			}
+			switch mode := fd.Mode(); {
+			case mode.IsDir():
+				log.Fatal("With -t=true flag, you need to input a tarball")
+			case mode.IsRegular():
+				processTar(c.certPath, jsonPath, c.format)
+				break
 			}
 		} else {
 			var path []string
@@ -221,7 +244,12 @@ func main() {
 			for _, f := range files {
 				path[1] = f.Name()
 				jsonPath = strings.Join(path, "/")
-				processFile(c.certPath, jsonPath, c.format)
+				fd, err := os.Open(jsonPath)
+				if err != nil {
+					log.Fatal(err)
+				}
+				bf := bufio.NewReader(fd)
+				processFile(bf, jsonPath, c.format)
 
 				// Exit Signal Handle
 				select {
@@ -235,23 +263,57 @@ func main() {
 	}
 }
 
-func processFile(fp string, p string, f string) {
+func processTar(fp string, p string, f string) error {
+	fd, err := os.Open(fp)
+	if err != nil {
+		log.Fatal(err)
+	}
+	bf := bufio.NewReader(fd)
+	gzr, err := gzip.NewReader(bf)
+	if err != nil {
+		return err
+	}
+	defer gzr.Close()
+	tr := tar.NewReader(gzr)
+	for {
+		header, err := tr.Next()
+		switch {
+		// if no more files are found return
+		case err == io.EOF:
+			return nil
+		// return any other error
+		case err != nil:
+			return err
+		// if the header is nil, just skip it (not sure how this happens)
+		case header == nil:
+			continue
+		}
+		switch header.Typeflag {
+		case tar.TypeDir:
+			continue
+		case tar.TypeReg:
+			processFile(tr, fp, f)
+		}
+	}
+}
+
+func processFile(r io.Reader, fp string, f string) {
 	switch f {
 	case "json":
-		processJSON(fp, p)
+		processJSON(r, fp)
 		break
 	case "der":
-		processDER(fp, p)
+		processDER(r, fp)
 		break
 	case "crt":
-		processCRT(fp, p)
+		processCRT(r, fp)
 		break
 	}
 }
 
-func processDER(fp string, p string) bool {
+func processDER(r io.Reader, p string) bool {
 	// read corresponding der file
-	dat, err := ioutil.ReadFile(p)
+	dat, err := ioutil.ReadAll(r)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -316,14 +378,14 @@ J:
 	return nil
 }
 
-func processCRT(fp string, p string) bool {
+func processCRT(r io.Reader, fp string) bool {
 
 	return true
 }
 
-func processJSON(fp string, p string) bool {
+func processJSON(r io.Reader, fp string) bool {
 	// read corresponding json file
-	dat, err := ioutil.ReadFile(p)
+	dat, err := ioutil.ReadAll(r)
 	if err != nil {
 		log.Fatal(err)
 	}
