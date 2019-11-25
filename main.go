@@ -156,7 +156,9 @@ func main() {
 	}
 
 	// Parse Certificate Folder
-	c.certPath = string(readConfFile(*confdir, "certfolder"))
+	if !*pull {
+		c.certPath = string(readConfFile(*confdir, "certfolder"))
+	}
 	c.recursive = *recursive
 	c.tarball = *tarball
 	c.format = *format
@@ -189,16 +191,31 @@ func main() {
 		for {
 			err := errors.New("")
 			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:ja3-jl:"+c.redisQueue))
+			err = filepath.Walk(jsonPath,
+				func(path string, info os.FileInfo, err error) error {
+					if err != nil {
+						return err
+					}
+					if !info.IsDir() {
+						fd, err := os.Open(path)
+						if err != nil {
+							log.Fatal(err)
+						}
+						bf := bufio.NewReader(fd)
+						fmt.Println(path)
+						processFile(bf, path, c.format)
+						// Exit Signal Handle
+						select {
+						case <-s:
+							fmt.Println("Exiting...")
+							os.Exit(0)
+						default:
+						}
+					}
+					return nil
+				})
 			if err != nil {
-				time.Sleep(2 * time.Second)
-			}
-			// Exit Signal Handle
-			select {
-			case <-s:
-				fmt.Println("Exiting...")
-				os.Exit(0)
-			default:
-				continue
+				log.Fatal(err)
 			}
 		}
 	} else { // Files
@@ -214,6 +231,7 @@ func main() {
 							log.Fatal(err)
 						}
 						bf := bufio.NewReader(fd)
+						fmt.Println(path)
 						processFile(bf, path, c.format)
 					}
 					return nil
@@ -362,8 +380,10 @@ func insertLeafCertificate(fp string, c certMapElm) error {
 		}
 	}
 J:
-	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
+	// q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
+	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (hash) DO UPDATE SET file_path = excluded.file_path`
 	_, err = db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, fp)
+	fmt.Println(fp)
 	if err != nil {
 		return err
 	}
