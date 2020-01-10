@@ -7,15 +7,6 @@
 SET check_function_bodies = false;
 -- ddl-end --
 
--- object: cia_dev | type: ROLE --
--- DROP ROLE IF EXISTS cia_dev;
-CREATE ROLE cia_dev WITH 
-	INHERIT
-	LOGIN
-	ENCRYPTED PASSWORD '********';
--- ddl-end --
-
-
 -- Database creation must be done outside a multicommand file.
 -- These commands were put in this file only as a convenience.
 -- -- object: passive_ssl | type: DATABASE --

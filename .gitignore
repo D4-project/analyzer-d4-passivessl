@@ -4,6 +4,7 @@
 *.dll
 *.so
 *.dylib
+analyzer-d4-passivessl
 
 # Test binary, build with `go test -c`
 *.test

@@ -20,11 +20,9 @@ import (
 	"io/ioutil"
 	"log"
 	"math/big"
-	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -33,6 +31,8 @@ import (
 
 	"github.com/gomodule/redigo/redis"
 	_ "github.com/lib/pq"
+
+	config "github.com/D4-project/d4-golang-utils/config"
 )
 
 type (
@@ -132,7 +132,7 @@ func main() {
 	}
 
 	// Parse DB Config
-	tmp := readConfFile(*confdir, "postgres")
+	tmp := config.ReadConfigFile(*confdir, "postgres")
 	ss := strings.Split(string(tmp), "/")
 	if len(ss) <= 1 {
 		log.Fatal("Missing Database in Postgres config: should be user:pwd@host:port/database_name")
@@ -148,7 +148,7 @@ func main() {
 	}
 	c.postgresUser = sssu[0]
 	c.postgresPWD = sssu[1]
-	ret, ssh := isNet(sssat[1])
+	ret, ssh := config.IsNet(sssat[1])
 	if !ret {
 		sssh := strings.Split(string(ssh), ":")
 		c.postgresHost = sssh[0]
@@ -157,7 +157,7 @@ func main() {
 
 	// Parse Certificate Folder
 	if !*pull {
-		c.certPath = string(readConfFile(*confdir, "certfolder"))
+		c.certPath = string(config.ReadConfigFile(*confdir, "certfolder"))
 	}
 	c.recursive = *recursive
 	c.tarball = *tarball
@@ -171,35 +171,35 @@ func main() {
 
 	if *pull { // Redis
 		// Parse Redis Config
-		tmp := readConfFile(*confdir, "redis")
+		tmp := config.ReadConfigFile(*confdir, "redis")
 		ss := strings.Split(string(tmp), "/")
 		if len(ss) <= 1 {
 			log.Fatal("Missing Database in Redis config: should be host:port/database_name")
 		}
 		c.redisDB, _ = strconv.Atoi(ss[1])
 		var ret bool
-		ret, ss[0] = isNet(ss[0])
+		ret, ss[0] = config.IsNet(ss[0])
 		if !ret {
 			sss := strings.Split(string(ss[0]), ":")
 			c.redisHost = sss[0]
 			c.redisPort = sss[1]
 		}
-		c.redisQueue = string(readConfFile(*confdir, "redis_queue"))
+		c.redisQueue = string(config.ReadConfigFile(*confdir, "redis_queue"))
 		initRedis(c.redisHost, c.redisPort, c.redisDB)
 		defer cr.Close()
 		// pop redis queue
 		for {
 			err := errors.New("")
 			jsonPath, err = redis.String(cr.Do("LPOP", "analyzer:ja3-jl:"+c.redisQueue))
+			if err != nil {
+				log.Fatal(err)
+			}
 			err = filepath.Walk(jsonPath,
 				func(path string, info os.FileInfo, err error) error {
-					if err != nil {
-						return err
-					}
 					if !info.IsDir() {
 						fd, err := os.Open(path)
 						if err != nil {
-							log.Fatal(err)
+							return err
 						}
 						bf := bufio.NewReader(fd)
 						fmt.Println(path)
@@ -708,87 +708,4 @@ func (t *sessionRecord) String() string {
 	}
 	buf.WriteString(fmt.Sprintf("---------------SESSION  END--------------------\n"))
 	return buf.String()
-}
-
-func isNet(host string) (bool, string) {
-	// DNS regex
-	validDNS := regexp.MustCompile(`^(([a-zA-Z]{1})|([a-zA-Z]{1}[a-zA-Z]{1})|([a-zA-Z]{1}[0-9]{1})|([0-9]{1}[a-zA-Z]{1})|([a-zA-Z0-9][a-zA-Z0-9-_]{1,61}[a-zA-Z0-9]))\.([a-zA-Z]{2,6}|[a-zA-Z0-9-]{2,30}\.[a-zA-Z
- ]{2,3})$`)
-	// Check ipv6
-	if strings.HasPrefix(host, "[") {
-		// Parse an IP-Literal in RFC 3986 and RFC 6874.
-		// E.g., "[fe80::1]:80".
-		i := strings.LastIndex(host, "]")
-		if i < 0 {
-			log.Fatal("Unmatched [ in destination config")
-			return false, ""
-		}
-		if !validPort(host[i+1:]) {
-			log.Fatal("No valid port specified")
-			return false, ""
-		}
-		// trim brackets
-		if net.ParseIP(strings.Trim(host[:i+1], "[]")) != nil {
-			log.Fatal(fmt.Sprintf("Server IP: %s, Server Port: %s\n", host[:i+1], host[i+1:]))
-			return true, host
-		}
-	} else {
-		// Ipv4 or DNS name
-		ss := strings.Split(string(host), ":")
-		if len(ss) > 1 {
-			if !validPort(":" + ss[1]) {
-				log.Fatal("No valid port specified")
-				return false, ""
-			}
-			if net.ParseIP(ss[0]) != nil {
-				log.Fatal(fmt.Sprintf("Server IP: %s, Server Port: %s\n", ss[0], ss[1]))
-				return true, host
-			} else if validDNS.MatchString(ss[0]) {
-				log.Fatal(fmt.Sprintf("DNS: %s, Server Port: %s\n", ss[0], ss[1]))
-				return true, host
-			}
-		}
-	}
-	return false, host
-}
-
-// Reusing code from net.url
-// validOptionalPort reports whether port is either an empty string
-// or matches /^:\d*$/
-func validPort(port string) bool {
-	if port == "" {
-		return false
-	}
-	if port[0] != ':' {
-		return false
-	}
-	for _, b := range port[1:] {
-		if b < '0' || b > '9' {
-			return false
-		}
-	}
-	return true
-}
-
-func readConfFile(p string, fileName string) []byte {
-	f, err := os.OpenFile("./"+p+"/"+fileName, os.O_RDWR|os.O_CREATE, 0666)
-	defer f.Close()
-	if err != nil {
-		log.Fatal(err)
-	}
-	data := make([]byte, 100)
-	count, err := f.Read(data)
-	if err != nil {
-		if err != io.EOF {
-			log.Fatal(err)
-		}
-	}
-	if count == 0 {
-		log.Fatal(fileName + " is empty.")
-	}
-	if err := f.Close(); err != nil {
-		log.Fatal(err)
-	}
-	// trim \n if present
-	return bytes.TrimSuffix(data[:count], []byte("\n"))
 }
