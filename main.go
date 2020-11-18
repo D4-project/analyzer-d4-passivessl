@@ -87,7 +87,7 @@ var (
 	recursive = flag.Bool("r", false, "should it open the directory recursively")
 	tarball   = flag.Bool("t", false, "is it a tar archive")
 	format    = flag.String("f", "json", "certificate file format [json, crt, der]")
-	pull      = flag.Bool("p", true, "pull from redis?")
+	pull      = flag.Bool("p", false, "pull from redis?")
 	cr        redis.Conn
 )
 
@@ -380,8 +380,8 @@ func insertLeafCertificate(fp string, c certMapElm) error {
 		}
 	}
 J:
-	// q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
-	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (hash) DO UPDATE SET file_path = excluded.file_path`
+	// q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, atrest_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
+	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, atrest_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (hash) DO UPDATE SET atrest_path = excluded.atrest_path`
 	_, err = db.Exec(q, c.CertHash, c.Certificate.IsCA, false, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), nil, false, fp)
 	fmt.Println(fp)
 	if err != nil {
@@ -624,7 +624,7 @@ func unique(s []certMapElm) []certMapElm {
 }
 
 func insertCertificate(fp string, c certMapElm) (string, error) {
-	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, file_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
+	q := `INSERT INTO "certificate" (hash, "is_CA", "is_SS", issuer, subject, cert_chain, is_valid_chain, atrest_path) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT DO NOTHING`
 	_, err := db.Exec(q, c.CertHash, c.Certificate.IsCA, c.chain.isSS, c.Certificate.Issuer.String(), c.Certificate.Subject.String(), c.chain.s, c.chain.isValid, getFullPath(fp, c.CertHash))
 	if err != nil {
 		return c.CertHash, err

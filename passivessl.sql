@@ -68,7 +68,7 @@ ALTER TABLE public.public_key OWNER TO postgres;
 -- object: public.certificate | type: TABLE --
 -- DROP TABLE IF EXISTS public.certificate CASCADE;
 CREATE TABLE public.certificate(
-	mounted_path character varying(4096) NOT NULL,
+	mounted_path character varying(4096),
 	issuer text,
 	cert_chain ltree,
 	subject text,
@@ -94,7 +94,7 @@ CREATE TABLE public.certificate(
 	"PermittedURIDomains" text[],
 	"ExcludedURIDomains" text[],
 	fs_type smallint DEFAULT 0,
-	atrest_path character varying(4096) NOT NULL,
+	atrest_path character varying(4096),
 	CONSTRAINT certificate_pk PRIMARY KEY (hash)
 
 );
