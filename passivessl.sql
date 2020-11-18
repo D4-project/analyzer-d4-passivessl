@@ -312,54 +312,8 @@ CREATE INDEX path_index ON public.certificate
 	WITH (FILLFACTOR = 90);
 -- ddl-end --
 
--- object: pg_catalog.plpython3_validator | type: FUNCTION --
--- DROP FUNCTION IF EXISTS pg_catalog.plpython3_validator(oid) CASCADE;
-CREATE FUNCTION pg_catalog.plpython3_validator ( _param1 oid)
-	RETURNS void
-	LANGUAGE c
-	VOLATILE 
-	STRICT
-	SECURITY INVOKER
-	COST 1
-	AS '$libdir/plpython3', 'plpython3_validator';
--- ddl-end --
-ALTER FUNCTION pg_catalog.plpython3_validator(oid) OWNER TO postgres;
--- ddl-end --
-
--- object: pg_catalog.plpython3_call_handler | type: FUNCTION --
--- DROP FUNCTION IF EXISTS pg_catalog.plpython3_call_handler() CASCADE;
-CREATE FUNCTION pg_catalog.plpython3_call_handler ()
-	RETURNS language_handler
-	LANGUAGE c
-	VOLATILE 
-	CALLED ON NULL INPUT
-	SECURITY INVOKER
-	COST 1
-	AS '$libdir/plpython3', 'plpython3_call_handler';
--- ddl-end --
-ALTER FUNCTION pg_catalog.plpython3_call_handler() OWNER TO postgres;
--- ddl-end --
-
--- object: pg_catalog.plpython3_inline_handler | type: FUNCTION --
--- DROP FUNCTION IF EXISTS pg_catalog.plpython3_inline_handler(internal) CASCADE;
-CREATE FUNCTION pg_catalog.plpython3_inline_handler ( _param1 internal)
-	RETURNS void
-	LANGUAGE c
-	VOLATILE 
-	STRICT
-	SECURITY INVOKER
-	COST 1
-	AS '$libdir/plpython3', 'plpython3_inline_handler';
--- ddl-end --
-ALTER FUNCTION pg_catalog.plpython3_inline_handler(internal) OWNER TO postgres;
--- ddl-end --
-
--- object: plpython3u | type: LANGUAGE --
 -- DROP LANGUAGE IF EXISTS plpython3u CASCADE;
-CREATE  LANGUAGE plpython3u
-	HANDLER pg_catalog.plpython3_call_handler
-	VALIDATOR pg_catalog.plpython3_validator
-	INLINE pg_catalog.plpython3_inline_handler;
+CREATE  LANGUAGE plpython3u;
 -- ddl-end --
 ALTER LANGUAGE plpython3u OWNER TO postgres;
 -- ddl-end --
@@ -451,21 +405,11 @@ CREATE FUNCTION pg_catalog.plpython3_inline_handler_cp ( _param1 internal)
 ALTER FUNCTION pg_catalog.plpython3_inline_handler_cp(internal) OWNER TO postgres;
 -- ddl-end --
 
--- object: plpython3u_cp | type: LANGUAGE --
--- DROP LANGUAGE IF EXISTS plpython3u_cp CASCADE;
-CREATE  LANGUAGE plpython3u_cp
-	HANDLER pg_catalog.plpython3_call_handler
-	VALIDATOR pg_catalog.plpython3_validator
-	INLINE pg_catalog.plpython3_inline_handler;
--- ddl-end --
-ALTER LANGUAGE plpython3u_cp OWNER TO postgres;
--- ddl-end --
-
 -- object: public.zgrep | type: FUNCTION --
 -- DROP FUNCTION IF EXISTS public.zgrep(text,text) CASCADE;
 CREATE FUNCTION public.zgrep ( a text,  b text)
 	RETURNS integer
-	LANGUAGE plpython3u_cp
+	LANGUAGE plpython3u
 	VOLATILE 
 	CALLED ON NULL INPUT
 	SECURITY INVOKER
